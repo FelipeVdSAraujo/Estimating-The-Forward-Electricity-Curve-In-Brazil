@@ -10,4 +10,4 @@ Data - contain datasets used by the authors and loaded by the R scripts.
 Rcode - contain the scripts that can be executed provided the data is organized in the same structure as this repository.
 
 In the main level the calculations are saved in HTML files created by R Notebooks which show the executed commands and their results, along with plots.
-The Sensibility Analysis uses an interactive *plotly* widget that can take a while to fully load.
+The sensitivity analysis uses an interactive *plotly* widget that can take a while to fully load.
