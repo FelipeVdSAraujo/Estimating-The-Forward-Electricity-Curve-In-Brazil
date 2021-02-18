@@ -1,0 +1,489 @@
+---
+title: "Sensitivity Testing"
+output: html_notebook
+---
+
+##  A Two Agent Model of Forward Electricity Prices in Brazil with Generalized Extended CVaR Preferences
+
+Authors: Felipe Van de Sande Araujo, Cristina Pimenta de Mello Spineti Luz, Leonardo Lima Gomes, Luiz Eduardo Teixeira Brandão
+
+Abstract: Despite its continental size and integrated electrical system, Brazil does not have an exchange for trading forward and futures contracts for electricity. Thus, price information for long-term contracts is often obtained through market research and expert opinions. This article proposes a simple yet efficient approach to estimate the forward price of electricity in the Brazilian energy market. The model is based on the equilibrium between two representative agents negotiating bilateral contracts where the agents’ risk aversion is derived from the utility functions related to the Generalized Extended Conditional Value-at-Risk Preference. This model is comprehensive and can be applied to all agents participating in the electricity futures transaction independent of whether they are directly involved in the production chain or simply carry speculative positions. Our results indicate that the model’s forecasted prices, which are based on the participants' expected behavior, can be used as an indicator for the forward price of electricity, providing more transparency and security for the participants in this market.
+
+This work presents the calculations done for the article referenced above. The following calculations show the sensitivity analysis for the optimized parameters which were obtained in the optimization step ([link](./ModelTrainingNotebook.nb.html)) and the risk-free return rate used in both training and validation step ([link](./ModelValidationNotebook.nb.html)). All the code was run in RStudio using the version of the software below.
+
+### Software version
+
+```{r}
+R.version
+```
+
+### Setting of the environment
+
+```{r}
+# Set plot font
+windowsFonts(A = windowsFont("Times New Roman")) 
+```
+
+### Local functions definition
+
+The first function is the determination of the ECPG phi which is the certainty equivalent of the agent when it is directly exposed to the spot prices.
+
+```{r}
+ECPG.phi <- function(parameters, dataset, auxList, buyer=TRUE) {
+  if (any(parameters < 0) || any(parameters > 1)) return(NA)
+  sumLambda = parameters['Lambda1'] + parameters['Lambda2']
+  if (sumLambda > 1) return(NA)
+  Lambda0 = 1 - sumLambda
+  if (Lambda0 < 0) return(NA)
+  
+  if (buyer) {
+    mean.pld = auxList$meanPLD
+    VaR0 = auxList$VaR0
+    VaR1 = auxList$VaR1
+  } else {
+    dataset = -dataset
+    mean.pld = -auxList$meanPLD
+    VaR0 = auxList$VaR1
+    VaR1 = auxList$VaR0
+  }
+  
+  VaRAlpha1 = apply(dataset, 1, quantile, (1-parameters['Alpha1']))
+  VaRAlpha2 = apply(dataset, 1, quantile, (1-parameters['Alpha2']))
+  
+  CVaR1 = CVaR2 = NA
+  
+  CVaR1.data = dataset
+  CVaR1.data[dataset > VaRAlpha1] <- NA
+  
+  CVaR2.data = dataset
+  CVaR2.data[dataset > VaRAlpha2] <- NA
+  
+  CVaR1 = apply(CVaR1.data, 1, mean, na.rm=TRUE)
+  CVaR2 = apply(CVaR2.data, 1, mean, na.rm=TRUE)
+  
+  Sum1 = parameters['Lambda1']*VaRAlpha1 + parameters['Lambda2']*VaRAlpha2
+  Sum2 = parameters['Lambda1']*(CVaR1 - VaRAlpha1) + parameters['Lambda2']*(CVaR2 - VaRAlpha2)
+  
+  Limit1 = Lambda0*VaR0 + Sum1
+  Limit2 = Lambda0*VaRAlpha1 + Sum1
+  Limit3 = Lambda0*VaRAlpha2 + Sum1
+  Limit4 = Lambda0*VaR1 + Sum1
+  
+  ECPG = Lambda0*mean.pld + parameters['Lambda1']*CVaR1 + parameters['Lambda2']*CVaR2
+  
+  nIter = nrow(dataset)
+  Lambda1 = rep(parameters['Lambda1'], nIter)
+  Lambda2 = rep(parameters['Lambda2'], nIter)
+  
+  if (any(ECPG>=Limit2)) Lambda1[ECPG>=Limit2] = 0
+  if (any(ECPG>=Limit3)) Lambda2[ECPG>=Limit3] = 0
+  
+  Q = Lambda0 + Lambda1/(1-parameters['Alpha1']) + Lambda2/(1-parameters['Alpha2'])
+  
+  A = Sum2 + Lambda0*mean.pld + 
+    Lambda1*VaRAlpha1/(1-parameters['Alpha1']) +
+    Lambda2*VaRAlpha2/(1-parameters['Alpha2'])
+  
+  Eq = A/Q
+  
+  if (any(is.na(Eq))) return(NA)
+  return(Eq)
+}
+```
+
+We will use a list with all the parameters and data which will be called ECPG_Object, in order to facilitate the next function calls. The next function will create the list.
+
+```{r}
+createECPGObject <- function(dataset, discountVector, forwardPrice, buyerParam, sellerParam) {
+  VaR0 = apply(dataset, 1, quantile, 1)
+  VaR1 = apply(dataset, 1, quantile, 0)
+  meanPLD = apply(dataset, 1, mean)
+  
+  ECPGObject = list(
+    dataset=dataset,
+    discountVector=discountVector,
+    forwardPrice=forwardPrice,
+    buyerParam=buyerParam,
+    sellerParam=sellerParam,
+    VaR0=VaR0,
+    VaR1=VaR1,
+    meanPLD=meanPLD
+  )
+  return(ECPGObject)
+}
+```
+
+Then we will define a function to obtain the equilibrium price using the calculated phi for each agent. The distinction between the agents must be made because the signal of the price data changes between them, because of the Contract for Differences revenue equations. 
+
+```{r}
+ECPG.equilibrium <- function (ECPGobject) {
+  auxList = list(
+    VaR0 = ECPGobject$VaR0,
+    VaR1 = ECPGobject$VaR1,
+    meanPLD = ECPGobject$meanPLD
+  )
+  
+  buyer.phi = ECPG.phi(ECPGobject$buyerParam, ECPGobject$dataset, auxList)
+  seller.phi = -ECPG.phi(ECPGobject$sellerParam, ECPGobject$dataset, auxList, buyer=FALSE)
+  
+  equilibrium.prices = (buyer.phi + seller.phi)/2
+  
+  adjusted.prices = equilibrium.prices/ECPGobject$discount
+  
+  averagePrice = mean(adjusted.prices)
+  
+  ECPGobject$buyerPhi = buyer.phi
+  ECPGobject$sellerPhi = seller.phi
+  ECPGobject$equilibriumPrices = equilibrium.prices
+  ECPGobject$adjustedPrices=adjusted.prices
+  ECPGobject$averagePrice=averagePrice
+  
+  return(ECPGobject)
+}
+```
+
+Next function is used in a recursive call to calculate sensitivity.
+
+```{r}
+sensitivity.foo <- function(i, arg, output, combination.matrix, ECPGobject) {
+  
+  ECPGobject[[arg]][TRUE] = combination.matrix[i, ]
+  
+  return(ECPG.equilibrium(ECPGobject)[[output]])
+}
+```
+
+And finally a plotting function for the ECPG_Object.
+
+```{r}
+sensitivity.prettyPlot <- function(plot.matrix, xlabel="", ylim=c(0,250), lwd = 2, legendTitle, legendPos="bottomright", inset=0.05, ncol=1, cex=1, legCex=0.9) {
+  Nseries = ncol(plot.matrix)
+  viridis.pallette = viridis(Nseries)
+  line.types = rep(1, Nseries)
+  
+  Nrows = 1:nrow(plot.matrix)
+  labels=row.names(plot.matrix)
+  
+  par(family="A", cex=cex)
+  matplot(Nrows, plot.matrix, type='l', xlab=xlabel, ylab='Electricity forward price (R$/MWh)', ylim=ylim, lty=line.types, col=viridis.pallette, lwd=lwd, axes=F)
+  axis(2)
+  axis(side=1,at=Nrows,labels=labels)
+  grid (NULL,NULL, lty = 6, col = "grey")
+  legend(x=legendPos, inset=inset, legend=colnames(plot.matrix), horiz=FALSE, lty=line.types, col=viridis.pallette, lwd=lwd, cex=legCex, ncol=ncol, title=legendTitle)
+}
+```
+
+### Local variables definition
+
+These variables will be used for all sensitivity tests. The optimization parameters are obtained from the training step.
+
+```{r}
+buyer.param = c(Lambda1 = 0.25159927, Lambda2 = 0.09390924, Alpha1 = 0.32334330, Alpha2 = 0.69293115)
+seller.param = c(Lambda1 = 0.1712721, Lambda2 = 0.7466865, Alpha1 = 0.7641934, Alpha2 = 0.9912755)
+```
+
+### Variables for July A+1 analysis
+
+Create a vector with discount rates to adjust the equilibrium prices with the risk-free return rate. Risk-free return rate is obtained as an approximation of the SELIC national rate.
+
+```{r}
+# Set risk free rates
+anualRate = 0.05
+monthlyRate = (1+anualRate)^(1/12)-1
+
+temp.discount.vector <- rep(NA, 23)
+for (i in 1:23){
+  temp.discount.vector[i] <- (1+monthlyRate)^(i-1)
+}
+julyA1.discountVector = temp.discount.vector[5:16]
+```
+
+Input the forward price for electricity obtained from DCide Energia.
+
+```{r}
+julyA1.forwardPrice = 205.43
+```
+
+### Loading the July A+1 data
+
+Loading future spot price (PLD) data.
+
+```{r}
+julyA1.original.data = read.csv(file='../Data/Data_Jul_2019_A1.csv', col.names=paste(month.abb, 2020, sep="-"))
+julyA1.data = t(julyA1.original.data)
+```
+
+Create a list with all variables and data to pass on to functions.
+
+```{r}
+julyA1.ECPG_object = createECPGObject(dataset = julyA1.data, buyerParam = buyer.param, sellerParam = seller.param, discountVector = julyA1.discountVector, forwardPrice = julyA1.forwardPrice)
+```
+
+Get the original results for comparison.
+
+```{r}
+julyA1.Results = ECPG.equilibrium(julyA1.ECPG_object)
+```
+
+
+### sensitivity for Lambda 1 and Lambda 2
+
+The first analysis is regarding $\lambda_1$ and $\lambda_2$ parameters for each agent.
+Those are the auxiliary variables set for this task.
+
+```{r}
+# Set sensitivity ranges
+
+lambdas.vec = seq(0, 0.45, by=0.05)
+lambdas.matrix = as.matrix(expand.grid(lambdas.vec, lambdas.vec))
+colnames(lambdas.matrix) = c('Lambda1', 'Lambda2')
+nLambdas = nrow(lambdas.matrix)
+```
+
+From the range set above a combination matrix is created with the **buyer** parameters.
+
+```{r}
+buyer.lambdas.matrix = cbind(lambdas.matrix, Alpha1=rep(buyer.param['Alpha1'], nLambdas), Alpha2=rep(buyer.param['Alpha2'], nLambdas))
+```
+
+Next, call the sensitivity function and create a matrix of the results for the **buyer**.
+
+```{r}
+lambdaBuyer.sensitivity = sapply(1:nLambdas,
+                                 sensitivity.foo,
+                                 arg = "buyerParam",
+                                 output = "averagePrice",
+                                 combination.matrix = buyer.lambdas.matrix,
+                                 julyA1.ECPG_object)
+
+lambdaBuyer.sensiMatrix = matrix(lambdaBuyer.sensitivity,
+                                 ncol=length(lambdas.vec),
+                                 byrow = TRUE,
+                                 dimnames = list(lambdas.vec, lambdas.vec))
+```
+
+Do the same for the **seller**.
+
+```{r}
+seller.lambdas.matrix = cbind(lambdas.matrix, Alpha1=rep(seller.param['Alpha1'], nLambdas), Alpha2=rep(seller.param['Alpha2'], nLambdas))
+```
+
+```{r}
+lambdaSeller.sensitivity = sapply(1:nLambdas,
+                                  sensitivity.foo,
+                                  arg = "sellerParam",
+                                  output = "averagePrice",
+                                  combination.matrix = seller.lambdas.matrix,
+                                  julyA1.ECPG_object)
+
+lambdaSeller.sensiMatrix = matrix(lambdaSeller.sensitivity,
+                                  ncol=length(lambdas.vec),
+                                  byrow = TRUE,
+                                  dimnames = list(lambdas.vec, lambdas.vec))
+```
+
+The result are plotted in an interactive widget using *plotly*.
+
+```{r}
+require(plotly)
+
+ax.xy <- list(ticketmode = 'array', ticktext = as.character(lambdas.vec), tickvals=0:9)
+axz <- list(title = "Electricity forward price (R$/MWh)")
+```
+
+Analysis of $\lambda_1$ and $\lambda_2$ for the **buyer**. The chart below is interactive.
+
+```{r}
+fig.Buyer <- plot_ly(width=1050, height=750) %>%
+  add_surface(z = lambdaBuyer.sensiMatrix) %>%
+  layout(scene = list(xaxis=c(ax.xy, title = "Buyer Lambda1"),yaxis=c(ax.xy, title = "Buyer Lambda2"),zaxis=axz))
+
+fig.Buyer
+```
+
+Create 2D visualization for the above data with Plotly contour plot
+
+```{r}
+fig.BuyerLambdaFlat <- plot_ly(
+  x = lambdas.vec, 
+  y = lambdas.vec, 
+  z = lambdaBuyer.sensiMatrix, 
+  type = "contour" 
+)
+
+fig.BuyerLambdaFlat <- fig.BuyerLambdaFlat %>% colorbar(
+  len=0.85,
+  title = "Electricity\nForward\nPrice\n(R$/MWh)")
+
+fig.BuyerLambdaFlat <- fig.BuyerLambdaFlat %>% layout(
+                      xaxis = list(title = "Buyer's Lambda 1"),
+                      yaxis = list(title = "Buyer's Lambda 2"),
+                      font=list(size=24)
+                      )
+
+fig.BuyerLambdaFlat
+```
+
+Analysis of $\lambda_1$ and $\lambda_2$ for the **seller**. The chart below is interactive.
+
+```{r}
+fig.Seller <- plot_ly(width=1050, height=750) %>%
+  add_surface(z = lambdaSeller.sensiMatrix) %>%
+  layout(scene = list(xaxis=c(ax.xy, title = "Seller Lambda1"),yaxis=c(ax.xy, title = "Seller Lambda2"),zaxis=axz))
+
+fig.Seller
+```
+
+Create 2D visualization for the above data with Plotly contour plot
+
+```{r}
+fig.SellerLambdaFlat <- plot_ly(
+  x = lambdas.vec, 
+  y = lambdas.vec, 
+  z = lambdaSeller.sensiMatrix, 
+  type = "contour" 
+)
+
+fig.SellerLambdaFlat <- fig.SellerLambdaFlat %>% colorbar(
+  len=0.85,
+  title = "Electricity\nForward\nPrice\n(R$/MWh)")
+
+fig.SellerLambdaFlat <- fig.SellerLambdaFlat %>% layout(
+  xaxis = list(title = "Seller's Lambda 1"),
+  yaxis = list(title = "Seller's Lambda 2"),
+  font=list(size=24)
+)
+
+fig.SellerLambdaFlat
+```
+
+### sensitivity for Lambda 1 and Alpha 1 in ECP
+
+The following test is regarding both $\alpha$ and $\lambda$ parameters for each agent using ECP measure instead of ECP_G.
+Those are the auxiliary variables set for this task.
+
+```{r}
+lambdaAlpha.vec = seq(0, 0.9, by=0.1)
+lambdaAlpha.matrix = as.matrix(expand.grid(lambdaAlpha.vec, lambdaAlpha.vec))
+colnames(lambdaAlpha.matrix) = c('Lambda1', 'Alpha1')
+nLambdaAlpha = nrow(lambdaAlpha.matrix)
+```
+
+From the range set above a combination matrix is created with the **buyer** parameters.
+
+```{r}
+buyer.lambdaAlpha.matrix = cbind(lambdaAlpha.matrix, Lambda2=rep(0, nLambdaAlpha), Alpha2=rep(buyer.param['Alpha2'], nLambdaAlpha))
+buyer.lambdaAlpha.matrix = buyer.lambdaAlpha.matrix[, c('Lambda1', 'Lambda2', 'Alpha1', 'Alpha2')]
+```
+
+Next, call the sensitivity function and create a matrix of the results for the **buyer**.
+
+```{r}
+lambdaAlphaBuyer.sensitivity = sapply(1:nLambdaAlpha,
+                                      sensitivity.foo,
+                                      arg="buyerParam",
+                                      output = "averagePrice",
+                                      combination.matrix = buyer.lambdaAlpha.matrix,
+                                      within(julyA1.ECPG_object, buyerParam[TRUE] <- rep(0,4)))
+
+lambdaAlphaBuyer.sensiMatrix = matrix(lambdaAlphaBuyer.sensitivity,
+                                      ncol=length(lambdaAlpha.vec),
+                                      byrow = TRUE,
+                                      dimnames = list(lambdaAlpha.vec, lambdaAlpha.vec))
+
+```
+
+And the same is done for the **seller**.
+
+```{r}
+seller.lambdaAlpha.matrix = cbind(lambdaAlpha.matrix, Lambda2=rep(0, nLambdaAlpha), Alpha2=rep(seller.param['Alpha2'], nLambdaAlpha))
+seller.lambdaAlpha.matrix = seller.lambdaAlpha.matrix[, c('Lambda1', 'Lambda2', 'Alpha1', 'Alpha2')]
+```
+
+```{r}
+lambdaAlphaSeller.sensitivity = sapply(1:nLambdaAlpha,
+                                       sensitivity.foo,arg="sellerParam",
+                                       output = "averagePrice",
+                                       combination.matrix = seller.lambdaAlpha.matrix,
+                                       within(julyA1.ECPG_object, sellerParam[TRUE] <- rep(0,4)))
+
+lambdaAlphaSeller.sensiMatrix = matrix(lambdaAlphaSeller.sensitivity,
+                                       ncol=length(lambdaAlpha.vec),
+                                       byrow = TRUE,
+                                       dimnames = list(lambdaAlpha.vec, lambdaAlpha.vec))
+```
+
+The results are visualized with our own plot function. Library *viridis* is called to provide color pallette for colorblind visualization.
+
+```{r}
+require(viridis)
+```
+
+Alpha-Lambda sensitivity for the **buyer**.
+
+```{r}
+sensitivity.prettyPlot(lambdaAlphaBuyer.sensiMatrix, xlabel=expression(paste("Buyer ", alpha, 1)), ylim=c(170, 250), legendPos = "bottom", ncol=5, cex=1.4, lwd=3, legendTitle=expression(paste("Buyer ", lambda, 1)))
+```
+
+Alpha-Lambda sensitivity for the **seller**.
+
+```{r}
+sensitivity.prettyPlot(lambdaAlphaSeller.sensiMatrix, xlabel=expression(paste("Seller ", alpha, 1)), ylim=c(0, 180), legendTitle=expression(paste("Seller ", lambda, 1)), legendPos = "bottom", ncol=5, inset=0.02, cex=1.4, lwd=3)
+```
+
+### Prepare variables for the risk-free rate sensitivity analysis
+
+Set auxiliary variables.
+
+```{r}
+annualRates.vec = seq(0, 0.09, by=0.01)
+monthlyRates.vec = (1+annualRates.vec)^(1/12)-1
+nRates = length(monthlyRates.vec)
+```
+
+Create a discount matrix to be passed to the sensitivity function.
+
+```{r}
+discount.matrix <- matrix(NA, ncol=35, nrow=nRates)
+for (ii in 1:nRates) {
+  for (i in 1:35){
+    discount.matrix[ii, i] <- (1+monthlyRates.vec[ii])^(i-1)
+  }
+}
+discount.matrix = discount.matrix[, 24:35]
+rownames(discount.matrix) = annualRates.vec
+```
+
+Apply the sensitivity function to obtain the average price for each risk-free rate.
+
+```{r}
+rates.sensitivity = sapply(1:nRates,
+                           sensitivity.foo,
+                           arg="discountVector",
+                           output = "averagePrice", 
+                           combination.matrix = discount.matrix,
+                           julyA1.ECPG_object)
+names(rates.sensitivity) = annualRates.vec
+```
+
+Check if results are internally consistent.
+
+```{r}
+julyA1.Results = ECPG.equilibrium(within(julyA1.ECPG_object, discountVector <- discount.matrix["0.05", ]))
+julyA1.Results$averagePrice == rates.sensitivity["0.05"]
+```
+
+Plot the results
+
+```{r}
+plot(annualRates.vec, rates.sensitivity, ylim=c(0,250), ylab="Electricity forward price (R$/MWh)", xlab="Annual Risk-Free Rate", col="steelblue")
+```
+
+
+
+
+### See also:
+
+Model Training ([link](./ModelTrainingNotebook.nb.html))
+
+Model Validation ([link](./ModelValidationNotebook.nb.html))

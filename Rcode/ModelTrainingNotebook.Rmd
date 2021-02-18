@@ -1,0 +1,327 @@
+---
+title: "Model Training"
+output: html_notebook
+---
+
+##  A Two Agent Model of Forward Electricity Prices in Brazil with Generalized Extended CVaR Preferences
+
+Authors: Felipe Van de Sande Araujo, Cristina Pimenta de Mello Spineti Luz, Leonardo Lima Gomes, Luiz Eduardo Teixeira Brandão
+
+Abstract: Despite its continental size and integrated electrical system, Brazil does not have an exchange for trading forward and futures contracts for electricity. Thus, price information for long-term contracts is often obtained through market research and expert opinions. This article proposes a simple yet efficient approach to estimate the forward price of electricity in the Brazilian energy market. The model is based on the equilibrium between two representative agents negotiating bilateral contracts where the agents’ risk aversion is derived from the utility functions related to the Generalized Extended Conditional Value-at-Risk Preference. This model is comprehensive and can be applied to all agents participating in the electricity futures transaction independent of whether they are directly involved in the production chain or simply carry speculative positions. Our results indicate that the model’s forecasted prices, which are based on the participants' expected behavior, can be used as an indicator for the forward price of electricity, providing more transparency and security for the participants in this market.
+
+This work presents the calculations done for the article referenced above. The following calculations show an optimization of the parameters of an ECP_G risk measure for two agents transacting bilateral contracts in the power market. All the code was run in RStudio using the version of the software below.
+
+### Software version
+
+```{r}
+R.version
+```
+
+### Setting of the environment
+
+```{r}
+# Set the random seed
+set.seed(2020) # The year of the start of this project
+```
+
+### Local functions definition
+
+The first function is the determination of the ECPG phi which is the certainty equivalent of the agent when it is directly exposed to the spot prices.
+
+```{r}
+ECPG.phi <- function(parameters, dataset, auxList, buyer=TRUE) {
+  if (any(parameters < 0) || any(parameters > 1)) return(NA)
+  sumLambda = parameters['Lambda1'] + parameters['Lambda2']
+  if (sumLambda > 1) return(NA)
+  Lambda0 = 1 - sumLambda
+  if (Lambda0 < 0) return(NA)
+  
+  if (buyer) {
+    mean.pld = auxList$meanPLD
+    VaR0 = auxList$VaR0
+    VaR1 = auxList$VaR1
+  } else {
+    dataset = -dataset
+    mean.pld = -auxList$meanPLD
+    VaR0 = auxList$VaR1
+    VaR1 = auxList$VaR0
+  }
+  
+  VaRAlpha1 = apply(dataset, 1, quantile, (1-parameters['Alpha1']))
+  VaRAlpha2 = apply(dataset, 1, quantile, (1-parameters['Alpha2']))
+  
+  CVaR1 = CVaR2 = NA
+  
+  CVaR1.data = dataset
+  CVaR1.data[dataset > VaRAlpha1] <- NA
+  
+  CVaR2.data = dataset
+  CVaR2.data[dataset > VaRAlpha2] <- NA
+  
+  CVaR1 = apply(CVaR1.data, 1, mean, na.rm=TRUE)
+  CVaR2 = apply(CVaR2.data, 1, mean, na.rm=TRUE)
+  
+  Sum1 = parameters['Lambda1']*VaRAlpha1 + parameters['Lambda2']*VaRAlpha2
+  Sum2 = parameters['Lambda1']*(CVaR1 - VaRAlpha1) + parameters['Lambda2']*(CVaR2 - VaRAlpha2)
+  
+  Limit1 = Lambda0*VaR0 + Sum1
+  Limit2 = Lambda0*VaRAlpha1 + Sum1
+  Limit3 = Lambda0*VaRAlpha2 + Sum1
+  Limit4 = Lambda0*VaR1 + Sum1
+  
+  ECPG = Lambda0*mean.pld + parameters['Lambda1']*CVaR1 + parameters['Lambda2']*CVaR2
+  
+  nIter = nrow(dataset)
+  Lambda1 = rep(parameters['Lambda1'], nIter)
+  Lambda2 = rep(parameters['Lambda2'], nIter)
+  
+  if (any(ECPG>=Limit2)) Lambda1[ECPG>=Limit2] = 0
+  if (any(ECPG>=Limit3)) Lambda2[ECPG>=Limit3] = 0
+  
+  Q = Lambda0 + Lambda1/(1-parameters['Alpha1']) + Lambda2/(1-parameters['Alpha2'])
+  
+  A = Sum2 + Lambda0*mean.pld + 
+    Lambda1*VaRAlpha1/(1-parameters['Alpha1']) +
+    Lambda2*VaRAlpha2/(1-parameters['Alpha2'])
+  
+  Eq = A/Q
+  
+  if (any(is.na(Eq))) return(NA)
+  return(Eq)
+}
+
+```
+
+We will use a list with all the parameters and data which will be called ECPG_Object, in order to facilitate the next function calls. The next function will create the list.
+
+```{r}
+createECPGObject <- function(dataset, discountVector, forwardPrice, buyerParam, sellerParam) {
+  VaR0 = apply(dataset, 1, quantile, 1)
+  VaR1 = apply(dataset, 1, quantile, 0)
+  meanPLD = apply(dataset, 1, mean)
+  
+  ECPGObject = list(
+    dataset=dataset,
+    discountVector=discountVector,
+    forwardPrice=forwardPrice,
+    buyerParam=buyerParam,
+    sellerParam=sellerParam,
+    VaR0=VaR0,
+    VaR1=VaR1,
+    meanPLD=meanPLD
+  )
+  return(ECPGObject)
+}
+```
+
+Then we will define a function to obtain the equilibrium price using the calculated phi for each agent. The distinction between the agents must be made because the signal of the price data changes between them, because of the revenue equations. 
+
+```{r}
+ECPG.equilibrium <- function (ECPGobject) {
+  auxList = list(
+    VaR0 = ECPGobject$VaR0,
+    VaR1 = ECPGobject$VaR1,
+    meanPLD = ECPGobject$meanPLD
+  )
+  
+  buyer.phi = ECPG.phi(ECPGobject$buyerParam, ECPGobject$dataset, auxList)
+  seller.phi = -ECPG.phi(ECPGobject$sellerParam, ECPGobject$dataset, auxList, buyer=FALSE)
+  
+  equilibrium.prices = (buyer.phi + seller.phi)/2
+  
+  adjusted.prices = equilibrium.prices/ECPGobject$discountVector
+  
+  averagePrice = yearly.mean(adjusted.prices)
+  if (length(averagePrice) != length(ECPGobject$forwardPrice)) stop("Error in ECPG.equilibrium function: Length of fowardPrice vector is different from the length of data divided by 12!")
+  
+  ECPGobject$buyerPhi = buyer.phi
+  ECPGobject$sellerPhi = seller.phi
+  ECPGobject$equilibriumPrices = equilibrium.prices
+  ECPGobject$adjustedPrices=adjusted.prices
+  ECPGobject$averagePrice=averagePrice
+  
+  return(ECPGobject)
+}
+
+```
+
+The next function will be used for the optimization with R command *optim*.
+
+```{r}
+optim.foo <- function(parameters, ECPGobject) {
+  param_b = parameters[1:4]
+  param_s = parameters[5:8]
+  names(param_b) = names(param_s) = c('Lambda1', 'Lambda2', 'Alpha1', 'Alpha2')
+  
+  ECPGobject$buyerParam = param_b
+  ECPGobject$sellerParam = param_s
+  
+  averagePrice = ECPG.equilibrium(ECPGobject)$averagePrice
+  
+  return(mean((averagePrice - ECPGobject$forwardPrice)^2))
+}
+```
+
+The next function is used to calculate the discount vector based on the risk-free rates for each data point.
+
+```{r}
+getDiscountVector <- function(index, modifier, anualRate) {
+  yearAdj = (11+modifier*12)
+  monthlyRate = (1+anualRate)^(1/12)-1
+  completeDiscountVector <- rep(NA, yearAdj)
+  for (i in 1:yearAdj){
+    completeDiscountVector[i] <- (1+monthlyRate)^(i-1)
+  }
+  
+  getDiscountBounds <- function(index, modifier, completeDiscountVector) {
+    lower.limit = 1+12*modifier-index
+    upper.limit = 12+12*modifier-index
+    
+    return(completeDiscountVector[lower.limit:upper.limit])
+  }
+  
+  discountVector = as.numeric(sapply(index, getDiscountBounds, modifier=modifier, completeDiscountVector=completeDiscountVector))
+  return(discountVector)
+}
+```
+
+We define an acessory function to calculate the yearly mean using the discount vector.
+
+```{r}
+yearly.mean <- function(x) {
+  len = length(x)
+  if (len/12 > len %/%12) stop("Error in yearly.mean function: Length of data is not divisible by 12!")
+  
+  mean.vec=NULL
+  
+  iter = len/12
+  for (i in 1:iter) {
+    mean.vec[i] = mean(x[(1+(i-1)*12):(i*12)])
+  }
+  return(mean.vec)
+}
+```
+
+### Local variables definition
+
+Set the initial optimization parameters. They must provide the optimization function with a non-NA return, which is a requirement from *optim*.
+
+```{r}
+buyer.initial.param = c(Lambda1 = 0, Lambda2 = 0, Alpha1 = 0.5, Alpha2 = 0.95) # Initial Parameters
+seller.initial.param = c(Lambda1 = 0, Lambda2 = 0, Alpha1 = 0.5, Alpha2 = 0.95) # Initial Parameter
+```
+
+Set the annual discount rate (the economy risk-free rate). A sensitivity analysis for this rate is provided in the sensitivity analysis sector ([link](./SensitivityAnalysisNotebook.nb.html)).
+
+```{r}
+anualRate = 0.05
+```
+
+Set the data points, defined by month and year, to be loaded for model training.
+
+```{r}
+data.index = rbind(
+  c(7, 2019),
+  c(8, 2019),
+  c(9, 2019),
+  c(10, 2019),
+  c(11, 2019),
+  c(12, 2019),
+  c(1, 2020),
+  c(2, 2020)
+)
+
+# Define the number of years ahead that the forward price is applied to.
+seriesA = 1
+```
+
+### Loading the data
+
+Load the forward price for electricity obtained from DCide Energia.
+
+```{r}
+forwardPrice.data = read.csv(file='../Data/ForwardPrices.csv')
+```
+
+Loading future spot price (PLD) data.
+
+```{r}
+data.abbrev = paste(month.abb[data.index[, 1]], data.index[,2], sep="_")
+
+price.data = list()
+for (n in 1:8) {
+  price.data[[data.abbrev[n]]] <- t(read.csv(file=paste('../Data/Data', data.abbrev[n], paste0('A', seriesA, '.csv'), sep="_"), col.names=paste(month.abb, data.index[n,2]+seriesA, sep="-")))
+}
+```
+
+### Allocate and verify data
+
+```{r}
+training.discountVector = getDiscountVector(data.index[,1], seriesA, anualRate)
+
+len = length(training.discountVector)
+if (len/12 > len %/%12) stop("Error in discountVector allocation: Length of data is not divisible by 12!")
+
+training.forwardPrice = as.numeric(forwardPrice.data[seriesA, 2:9])
+if(len/12 != length(training.forwardPrice)) stop("Error in forwardPrice: Length of data is not compatible with discountVector!")
+
+training.data = Reduce(rbind, price.data)
+if (nrow(training.data) != len) stop("Error in trainingDataA2: the number of rows is not compatible with the discountVector!")
+
+training.ECPG_object = createECPGObject(dataset = training.data, buyerParam = buyer.initial.param, sellerParam = seller.initial.param, discountVector = training.discountVector, forwardPrice = training.forwardPrice)
+
+```
+
+Inputting the data object to the equilibrium function will instantaneously provide the equilibrium price given the selected initial parameters.
+
+```{r}
+training.initialResults = ECPG.equilibrium(training.ECPG_object)
+print(training.initialResults$adjustedPrices)
+```
+The object carries all the provided parameters, so it is easy to verify after the execution.
+
+### Optimization of parameters
+
+Now the optimization will start. It can take up to 10 minutes running in a single core. Parallelism could be also used if need arise.
+
+```{r}
+## Run the optimization - uses proc.time to measure the execution time
+ptm = proc.time()
+
+optim.results = optim(c(buyer.initial.param, seller.initial.param), optim.foo, ECPGobject=training.ECPG_object, method="SANN")
+
+timeSpent = proc.time() - ptm
+print(timeSpent)
+
+```
+
+The optimized parameters are extracted from the optimization results.
+
+```{r}
+## Get ECPG parameters from optimization results
+training.ECPG_object$buyerParam = optim.results$par[1:4]
+training.ECPG_object$sellerParam = optim.results$par[5:8]
+```
+
+### Results
+
+The optimal parameters are used to calculate the equilibrium prices. The original object is overwritten because there is no data loss, only new information is added.
+
+```{r}
+## Calculate results from optimized parameters
+training.ECPG_object = ECPG.equilibrium(training.ECPG_object)
+print(training.ECPG_object$adjustedPrices)
+```
+
+Finally the results can be printed onscreen.
+
+```{r}
+training.ECPG_object$buyerParam
+training.ECPG_object$sellerParam
+```
+
+### See also:
+
+Model Validation ([link](./ModelValidationNotebook.nb.html))
+
+Sensitivity Analysis ([link](./SensitivityAnalysisNotebook.nb.html))

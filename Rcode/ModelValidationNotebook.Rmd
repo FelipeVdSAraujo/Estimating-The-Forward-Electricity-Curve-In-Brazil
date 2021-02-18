@@ -1,0 +1,460 @@
+---
+title: "Model Validation"
+output: html_notebook
+---
+
+##  A Two Agent Model of Forward Electricity Prices in Brazil with Generalized Extended CVaR Preferences
+
+Authors: Felipe Van de Sande Araujo, Cristina Pimenta de Mello Spineti Luz, Leonardo Lima Gomes, Luiz Eduardo Teixeira Brandão
+
+Abstract: Despite its continental size and integrated electrical system, Brazil does not have an exchange for trading forward and futures contracts for electricity. Thus, price information for long-term contracts is often obtained through market research and expert opinions. This article proposes a simple yet efficient approach to estimate the forward price of electricity in the Brazilian energy market. The model is based on the equilibrium between two representative agents negotiating bilateral contracts where the agents’ risk aversion is derived from the utility functions related to the Generalized Extended Conditional Value-at-Risk Preference. This model is comprehensive and can be applied to all agents participating in the electricity futures transaction independent of whether they are directly involved in the production chain or simply carry speculative positions. Our results indicate that the model’s forecasted prices, which are based on the participants' expected behavior, can be used as an indicator for the forward price of electricity, providing more transparency and security for the participants in this market.
+
+This work presents the calculations done for the article referenced above. The following calculations show the validation of the optimized parameters which were obtained in the optimization step ([link](./ModelTrainingNotebook.nb.html)). All the code was run in RStudio using the version of the software below.
+
+### Software version
+
+```{r}
+R.version
+```
+
+### Setting of the environment
+
+```{r}
+# Set plot font
+windowsFonts(A = windowsFont("Times New Roman")) 
+```
+
+### Local functions definition
+
+The first function is the determination of the ECPG phi which is the certainty equivalent of the agent when it is directly exposed to the spot prices.
+
+```{r}
+ECPG.phi <- function(parameters, dataset, auxList, buyer=TRUE) {
+  if (any(parameters < 0) || any(parameters > 1)) return(NA)
+  sumLambda = parameters['Lambda1'] + parameters['Lambda2']
+  if (sumLambda > 1) return(NA)
+  Lambda0 = 1 - sumLambda
+  if (Lambda0 < 0) return(NA)
+  
+  if (buyer) {
+    mean.pld = auxList$meanPLD
+    VaR0 = auxList$VaR0
+    VaR1 = auxList$VaR1
+  } else {
+    dataset = -dataset
+    mean.pld = -auxList$meanPLD
+    VaR0 = auxList$VaR1
+    VaR1 = auxList$VaR0
+  }
+  
+  VaRAlpha1 = apply(dataset, 1, quantile, (1-parameters['Alpha1']))
+  VaRAlpha2 = apply(dataset, 1, quantile, (1-parameters['Alpha2']))
+  
+  CVaR1 = CVaR2 = NA
+  
+  CVaR1.data = dataset
+  CVaR1.data[dataset > VaRAlpha1] <- NA
+  
+  CVaR2.data = dataset
+  CVaR2.data[dataset > VaRAlpha2] <- NA
+  
+  CVaR1 = apply(CVaR1.data, 1, mean, na.rm=TRUE)
+  CVaR2 = apply(CVaR2.data, 1, mean, na.rm=TRUE)
+  
+  Sum1 = parameters['Lambda1']*VaRAlpha1 + parameters['Lambda2']*VaRAlpha2
+  Sum2 = parameters['Lambda1']*(CVaR1 - VaRAlpha1) + parameters['Lambda2']*(CVaR2 - VaRAlpha2)
+  
+  Limit1 = Lambda0*VaR0 + Sum1
+  Limit2 = Lambda0*VaRAlpha1 + Sum1
+  Limit3 = Lambda0*VaRAlpha2 + Sum1
+  Limit4 = Lambda0*VaR1 + Sum1
+  
+  ECPG = Lambda0*mean.pld + parameters['Lambda1']*CVaR1 + parameters['Lambda2']*CVaR2
+  
+  nIter = nrow(dataset)
+  Lambda1 = rep(parameters['Lambda1'], nIter)
+  Lambda2 = rep(parameters['Lambda2'], nIter)
+  
+  if (any(ECPG>=Limit2)) Lambda1[ECPG>=Limit2] = 0
+  if (any(ECPG>=Limit3)) Lambda2[ECPG>=Limit3] = 0
+  
+  Q = Lambda0 + Lambda1/(1-parameters['Alpha1']) + Lambda2/(1-parameters['Alpha2'])
+  
+  A = Sum2 + Lambda0*mean.pld + 
+    Lambda1*VaRAlpha1/(1-parameters['Alpha1']) +
+    Lambda2*VaRAlpha2/(1-parameters['Alpha2'])
+  
+  Eq = A/Q
+  
+  if (any(is.na(Eq))) return(NA)
+  return(Eq)
+}
+
+```
+
+We define another function that explicitly calculates the risk premium for both agents. This function is redundant with the above one and the whole code could be simplified, but its objective is to provide a double verification step. The risk premium can also be calculated by using the simpler formulas provided in the article.
+
+```{r}
+ECPG.premium <- function(parameters, dataset, auxList, buyer=TRUE) {
+  if (any(parameters < 0) || any(parameters > 1)) return(NA)
+  sumLambda = parameters['Lambda1'] + parameters['Lambda2']
+  if (sumLambda > 1) return(NA)
+  Lambda0 = 1 - sumLambda
+  if (Lambda0 < 0) return(NA)
+  
+  if (buyer) {
+    mean.pld = auxList$meanPLD
+    VaR0 = auxList$VaR0
+    VaR1 = auxList$VaR1
+  } else {
+    dataset = -dataset
+    mean.pld = -auxList$meanPLD
+    VaR0 = auxList$VaR1
+    VaR1 = auxList$VaR0
+  }
+  
+  VaRAlpha1 = apply(dataset, 1, quantile, (1-parameters['Alpha1']))
+  VaRAlpha2 = apply(dataset, 1, quantile, (1-parameters['Alpha2']))
+  
+  CVaR1 = CVaR2 = NA
+  
+  CVaR1.data = dataset
+  CVaR1.data[dataset > VaRAlpha1] <- NA
+  
+  CVaR2.data = dataset
+  CVaR2.data[dataset > VaRAlpha2] <- NA
+  
+  CVaR1 = apply(CVaR1.data, 1, mean, na.rm=TRUE)
+  CVaR2 = apply(CVaR2.data, 1, mean, na.rm=TRUE)
+  
+  Sum1 = parameters['Lambda1']*VaRAlpha1 + parameters['Lambda2']*VaRAlpha2
+  Sum2 = parameters['Lambda1']*(CVaR1 - VaRAlpha1) + parameters['Lambda2']*(CVaR2 - VaRAlpha2)
+  
+  Limit1 = Lambda0*VaR0 + Sum1
+  Limit2 = Lambda0*VaRAlpha1 + Sum1
+  Limit3 = Lambda0*VaRAlpha2 + Sum1
+  Limit4 = Lambda0*VaR1 + Sum1
+  
+  ECPG = Lambda0*mean.pld + parameters['Lambda1']*CVaR1 + parameters['Lambda2']*CVaR2
+  
+  nIter = nrow(dataset)
+  Lambda1 = rep(parameters['Lambda1'], nIter)
+  Lambda2 = rep(parameters['Lambda2'], nIter)
+  
+  if (any(ECPG>=Limit2)) Lambda1[ECPG>=Limit2] = 0
+  if (any(ECPG>=Limit3)) Lambda2[ECPG>=Limit3] = 0
+  
+  Q = Lambda0 + Lambda1/(1-parameters['Alpha1']) + Lambda2/(1-parameters['Alpha2'])
+  
+  A =  - Sum2 + Lambda1*(mean.pld - VaRAlpha1)/(1-parameters['Alpha1']) +
+    Lambda2*(mean.pld - VaRAlpha2)/(1-parameters['Alpha2'])
+  
+  Eq = A/Q
+  
+  if (any(is.na(Eq))) return(NA)
+  return(Eq)
+}
+```
+
+
+We will use a list with all the parameters and data which will be called ECPG_Object, in order to facilitate the next function calls. The next function will create the list.
+
+```{r}
+createECPGObject <- function(dataset, discountVector, forwardPrice, buyerParam, sellerParam) {
+  VaR0 = apply(dataset, 1, quantile, 1)
+  VaR1 = apply(dataset, 1, quantile, 0)
+  meanPLD = apply(dataset, 1, mean)
+  
+  ECPGObject = list(
+    dataset=dataset,
+    discountVector=discountVector,
+    forwardPrice=forwardPrice,
+    buyerParam=buyerParam,
+    sellerParam=sellerParam,
+    VaR0=VaR0,
+    VaR1=VaR1,
+    meanPLD=meanPLD
+  )
+  return(ECPGObject)
+}
+```
+
+Then we will define a function to obtain the equilibrium price using the calculated phi for each agent. The distinction between the agents must be made because the signal of the price data changes between them, because of the Contract for Differences revenue equations. 
+
+```{r}
+ECPG.equilibrium <- function (ECPGobject) {
+  auxList = list(
+    VaR0 = ECPGobject$VaR0,
+    VaR1 = ECPGobject$VaR1,
+    meanPLD = ECPGobject$meanPLD
+  )
+  
+  buyer.phi = ECPG.phi(ECPGobject$buyerParam, ECPGobject$dataset, auxList)
+  seller.phi = -ECPG.phi(ECPGobject$sellerParam, ECPGobject$dataset, auxList, buyer=FALSE)
+  
+  buyer.premium = ECPG.premium(ECPGobject$buyerParam, ECPGobject$dataset, auxList)
+  seller.premium = -ECPG.premium(ECPGobject$sellerParam, ECPGobject$dataset, auxList, buyer=FALSE)
+  
+  equilibrium.prices = (buyer.phi + seller.phi)/2
+  
+  adjusted.prices = equilibrium.prices/ECPGobject$discount
+  
+  averagePrice = mean(adjusted.prices)
+  
+  ECPGobject$buyerPhi = buyer.phi
+  ECPGobject$sellerPhi = seller.phi
+  ECPGobject$buyerPremium = buyer.premium
+  ECPGobject$sellerPremium = seller.premium
+  ECPGobject$equilibriumPrices = equilibrium.prices
+  ECPGobject$adjustedPrices=adjusted.prices
+  ECPGobject$averagePrice=averagePrice
+  
+  return(ECPGobject)
+}
+```
+
+Next we define two functions for defining the discount vector, based on the annual risk-free rate.
+
+```{r}
+getCompleteDiscountVector <- function(index, modifier, anualRate) {
+  yearAdj = (11+modifier*12)
+  monthlyRate = (1+anualRate)^(1/12)-1
+  completeDiscountVector <- rep(NA, yearAdj)
+  for (i in 1:yearAdj){
+    completeDiscountVector[i] <- (1+monthlyRate)^(i-1)
+  }
+  
+  return(completeDiscountVector)
+}
+
+getDiscountBounds <- function(index, modifier, completeDiscountVector) {
+  lower.limit = 1+12*modifier-index
+  upper.limit = 12+12*modifier-index
+  
+  return(completeDiscountVector[lower.limit:upper.limit])
+}
+```
+
+
+And finally a plotting function for the ECPG_Object.
+
+```{r}
+data.prettyPlot <- function(DataObject, ylim=c(0,350), lwd = 2, legendPos="bottomright", inset=0.05, cex=1, legCex=0.7, horiz=FALSE) {
+  plot.matrix = cbind(DataObject$meanPLD, DataObject$forwardPrice, DataObject$averagePrice)
+  colnames(plot.matrix) = c("NEWAVE Spot", "DCide Forward", "Model Forward")
+  rownames(plot.matrix) = DataObject$labels
+  
+  Nseries = ncol(plot.matrix)
+  color.pallette = c("#56B4E9", "#F0E442", "#E69F00") # Selected for easy visualization for colorblind
+  line.types = c(2, 1, 1)
+  
+  Nrows = 1:nrow(plot.matrix)
+  labels=row.names(plot.matrix)
+  
+  LastInSample = which(data.index[,3]=="OUTSAMPLE")[1] - 1
+  
+  par(family="serif", cex=cex)
+  matplot(Nrows, plot.matrix, type='l', xlab="", ylab='Electricity forward price (R$/MWh)', ylim=ylim, lty=line.types, lwd=lwd, col=color.pallette, axes=F)
+  axis(2)
+  axis(side=1,at=Nrows,labels=labels)
+  grid (NULL,NULL, lty = 6, col = "grey", lwd = 1)
+  abline(v=LastInSample + 0.5, lty = 2)
+  text(x=LastInSample/2 + 0.5, y=25, "In sample")
+  text(x=(nrow(plot.matrix) - LastInSample)/2 + LastInSample + 0.5, y=25, "Out-of-sample")
+  legend(x=legendPos, inset=inset, legend=colnames(plot.matrix),col=color.pallette, lty=line.types, cex=legCex, horiz=horiz, lwd=lwd)
+}
+```
+
+### Local variables definition
+
+Set the calibrated parameters, obtained from the training stage and the annual risk-free rate. A sensitivity analysis for this rate is provided in the sensitivity analysis sector ([link](./SensitivityAnalysisNotebook.nb.html)).
+
+```{r}
+## Obtain optimized parameters from training 
+buyer.param = c(Lambda1 = 0.25159927, Lambda2 = 0.09390924, Alpha1 = 0.32334330, Alpha2 = 0.69293115)
+seller.param = c(Lambda1 = 0.1712721, Lambda2 = 0.7466865, Alpha1 = 0.7641934, Alpha2 = 0.9912755)
+
+anualRate = 0.05
+```
+
+### Loading Data
+
+Define the data points to be used for the model validation.
+
+```{r}
+data.index = rbind(
+  c(7, 2019, "insample"),
+  c(8, 2019, "insample"),
+  c(9, 2019, "insample"),
+  c(10, 2019, "insample"),
+  c(11, 2019, "insample"),
+  c(12, 2019, "insample"),
+  c(1, 2020, "insample"),
+  c(2, 2020, "insample"),
+  c(3, 2020, "OUTSAMPLE"),
+  c(4, 2020, "OUTSAMPLE"),
+  c(5, 2020, "OUTSAMPLE"),
+  c(6, 2020, "OUTSAMPLE"),
+  c(7, 2020, "OUTSAMPLE"),
+  c(8, 2020, "OUTSAMPLE"),
+  c(9, 2020, "OUTSAMPLE"),
+  c(10, 2020, "OUTSAMPLE")
+)
+
+# Define the number of years ahead that the forward price is applied to.
+seriesA = 1
+```
+
+Load and select the forward price for electricity obtained from DCide Energia.
+
+```{r}
+forwardPrice.data = read.csv(file='../Data/ForwardPrices.csv')
+colnames(forwardPrice.data) = c("Period", paste(c(rep(2019,6), rep(2020, 10)), c(7:12,1:10), sep="_"))
+
+selectedData = paste(data.index[,2], data.index[,1], sep="_")
+forwardPrices = as.numeric(forwardPrice.data[seriesA,selectedData])
+```
+
+Calculated the relevant discount vector for the whole period.
+
+```{r}
+completeDiscountVector = getCompleteDiscountVector(as.numeric(data.index[,1]), seriesA, anualRate)
+```
+
+### Start of Validation
+
+Create accessory variables
+
+```{r}
+data.abbrev = paste(month.abb[as.numeric(data.index[,1])], data.index[,2], sep="_")
+
+all.data = list()
+averagePrices = c()
+spotPrices = c()
+buyer.phi = c()
+seller.phi = c()
+buyer.premium = c()
+seller.premium = c()
+```
+
+Run the validation for each data point in a loop.
+
+```{r}
+for (n in 1:nrow(data.index)) {
+  
+  ## Set Variables
+  discountVector = getDiscountBounds(as.numeric(data.index[n,1]), seriesA, completeDiscountVector)
+  
+  forwardPrice = forwardPrices[n]
+  
+  ## Load Data
+  original.data = read.csv(file=paste('../Data/Data', data.abbrev[n], paste0('A', seriesA, '.csv'), sep="_"), col.names=paste(month.abb, as.numeric(data.index[n,2])+seriesA, sep="-"))
+  
+  spotPrices[n] = mean(colMeans(original.data))
+  
+  ECPG_object = createECPGObject(dataset = t(original.data), buyerParam = buyer.param, sellerParam = seller.param, discountVector = discountVector, forwardPrice = forwardPrice)
+  
+  ## Calculate results from optimized parameters
+  ECPG_object = ECPG.equilibrium(ECPG_object)
+  
+  all.data[[data.abbrev[n]]] <- ECPG_object
+  averagePrices[n] = ECPG_object$averagePrice
+  buyer.phi[n] = mean(ECPG_object$buyerPhi)
+  seller.phi[n] = mean(ECPG_object$sellerPhi)
+  buyer.premium[n] = mean(ECPG_object$buyerPremium)
+  seller.premium[n] = mean(ECPG_object$sellerPremium)
+}
+```
+
+### Plot the validation results
+
+Create a list to used with the plotting function
+
+```{r}
+consolidated.data <- list()
+consolidated.data$meanPLD = spotPrices
+consolidated.data$forwardPrice = forwardPrices
+consolidated.data$averagePrice = averagePrices
+consolidated.data$labels = data.abbrev
+```
+
+Finally the results can be plotted.
+
+```{r}
+data.prettyPlot(consolidated.data, lwd=3, cex=1.1, horiz=TRUE, legCex=1, legendPos="top")
+```
+
+
+### Plot Certainty Equivalent and risk premia for the market participants
+
+Create a matrix with the data and plot a sketch of it. Another prettier plot will be made below with plotly.
+
+```{r}
+ecqMat = rbind(buyer.phi, seller.phi, averagePrices, spotPrices)
+matplot(t(ecqMat), type='l')
+```
+
+Load plotly library
+```{r}
+require(plotly)
+```
+
+Create the plotly chart.
+```{r}
+data <- data.frame(month=data.abbrev, seller=seller.phi, buyer=buyer.phi, spot=spotPrices, average = averagePrices)
+
+#The default order will be alphabetized unless specified as below:
+data$month <- factor(data$month, levels = data[["month"]])
+
+fig <- plot_ly(data, x = ~month, y = ~seller, type = 'scatter', mode = 'lines',
+               line = list(color = 'rgba(0,100,80,1)'),
+               showlegend = TRUE, name = 'Seller C.E.')
+
+fig <- fig %>% add_trace(y = ~average, type = 'scatter', mode = 'lines',
+                         fill = 'tonexty', fillcolor='rgba(0,100,80,0.2)', line = list(color = 'rgba(0,0,0,1)', dash='dash'),
+                         showlegend = TRUE, name = 'Equilibrium Price')
+
+fig <- fig %>% add_trace(y = ~spot, type = 'scatter', mode = 'lines',
+                         fill = 'tonexty', fillcolor='rgba(0,100,80,0.2)', line = list(color = 'rgba(0,0,100,1)', dash='dot'),
+                         showlegend = TRUE, name = 'Forecasted Spot Price')
+
+fig <- fig %>% add_trace(y = ~buyer, type = 'scatter', mode = 'lines',
+                         fill = 'tonexty', fillcolor='rgba(100,0,80,0.2)', line = list(color = 'rgba(100,0,80,1)'),
+                         showlegend = TRUE, name = 'Buyer C.E.')
+
+fig <- fig %>% layout(paper_bgcolor='rgb(255,255,255)', plot_bgcolor='rgb(229,229,229)',
+                      xaxis = list(title = "Months",
+                                   gridcolor = 'rgb(255,255,255)',
+                                   showgrid = TRUE,
+                                   showline = FALSE,
+                                   showticklabels = TRUE,
+                                   tickcolor = 'rgb(127,127,127)',
+                                   ticks = 'outside',
+                                   zeroline = FALSE),
+                      yaxis = list(title = "Electricity forward price (R$/MWh)",
+                                   gridcolor = 'rgb(255,255,255)',
+                                   showgrid = TRUE,
+                                   showline = FALSE,
+                                   showticklabels = TRUE,
+                                   tickcolor = 'rgb(127,127,127)',
+                                   ticks = 'outside',
+                                   zeroline = FALSE),
+                      font=list(size=14),
+                      legend=list(
+                        x=0.7,
+                        y=0.9,
+                        traceorder='normal'
+                        ))
+```
+
+View the plotly figure
+```{r}
+fig
+```
+
+
+### See also:
+
+Model Training ([link](./ModelTrainingNotebook.nb.html))
+
+Model Sensitivity ([link](./SensitivityAnalysisNotebook.nb.html))
