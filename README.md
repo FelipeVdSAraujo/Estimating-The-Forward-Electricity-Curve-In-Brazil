@@ -11,3 +11,5 @@ Rcode - contain the scripts that can be executed provided the data is organized 
 
 In the main level the calculations are saved in HTML files created by R Notebooks which show the executed commands and their results, along with plots.
 The sensitivity analysis uses an interactive *plotly* widget that can take a while to fully load.
+
+Navigate code with HTML guide files: https://felipevdsaraujo.github.io/Estimating-The-Forward-Electricity-Curve-In-Brazil/
